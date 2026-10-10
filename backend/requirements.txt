@@ -1,2 +1,6 @@
 fastapi[standard]>=0.115
 python-dotenv>=1.0
+sqlalchemy>=2.0
+pymysql>=1.1
+cryptography>=42
+alembic>=1.13

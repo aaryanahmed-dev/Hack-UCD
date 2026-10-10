@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI app.
+FastAPI app. The API contract (endpoints, JSON conventions, room lifecycle, realtime) is in [`../API_SPEC.md`](../API_SPEC.md).
 
 ## Setup
 
@@ -19,6 +19,22 @@ fastapi dev app/main.py
 ```
 
 API at http://localhost:8000, interactive docs at http://localhost:8000/docs.
+`GET /health/db` checks the MySQL connection.
+
+## Database (MySQL + Alembic)
+
+Needs a local MySQL 8 with a `hackathondb` database; set `DATABASE_URL` in `.env`.
+
+- Models go in `app/models/` (subclass `app.db.Base`) and must be imported in `app/models/__init__.py`.
+- Routes get a session with `db: Session = Depends(get_db)`.
+- After changing models:
+
+```bash
+alembic revision --autogenerate -m "describe change"   # review the file in alembic/versions/
+alembic upgrade head
+```
+
+Teammates run `alembic upgrade head` after pulling.
 
 ## Share it (ngrok)
 

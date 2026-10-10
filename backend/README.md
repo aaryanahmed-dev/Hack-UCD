@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI app. The API contract (endpoints, JSON conventions, room lifecycle, realtime) is in [`../API_SPEC.md`](../API_SPEC.md).
+FastAPI app. The API contract (endpoints, JSON conventions, session lifecycle, realtime) is in [`../API_SPEC.md`](../API_SPEC.md).
 
 ## Setup
 

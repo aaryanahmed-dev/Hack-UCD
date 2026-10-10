@@ -10,7 +10,8 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (registers tables)
 from app import config
-from app.db import Base, get_db
+from app import db as db_module
+from app.db import Base
 from app.main import app
 
 TEST_SECRET = "test-secret-at-least-32-bytes-long!!"
@@ -24,21 +25,13 @@ def auth_config(monkeypatch):
 
 
 @pytest.fixture
-def db_session():
+def db_session(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-
-    def override_get_db():
-        db = TestingSession()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
+    # get_db and the WebSocket handlers both open sessions through db_module.SessionLocal
+    monkeypatch.setattr(db_module, "SessionLocal", TestingSession)
     yield TestingSession
-    app.dependency_overrides.clear()
     engine.dispose()
 
 

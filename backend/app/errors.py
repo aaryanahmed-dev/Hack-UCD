@@ -4,8 +4,25 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
+
+
+class UnhandledErrorMiddleware(BaseHTTPMiddleware):
+    """Turn crashes into the standard 500 error body *inside* the CORS middleware.
+
+    Starlette's own last-resort handler runs outside CORS, so browsers would see a response
+    without CORS headers and report it as a network failure instead of a server error.
+    Must be added before CORSMiddleware so CORS wraps it.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+            return _error_response(500, "internal_error", "Something went wrong.")
 
 
 class ApiError(Exception):

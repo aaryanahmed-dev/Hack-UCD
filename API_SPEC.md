@@ -3,7 +3,7 @@
 The single source of truth for how the FastAPI backend behaves and how the React Native (Expo) frontend talks to it.
 Frontend code must follow this contract exactly; backend code must implement it exactly. If something needs to change, change this file first.
 
-> **Status:** Phase 1 (Foundation) implemented: error format, camelCase schemas, Supabase auth, `/api/me` (+ onboarding, stats), `/api/users`. Stats that depend on sessions return zeros until those phases land. Everything else below is the target design.
+> **Status:** Phases 1–2 implemented: error format, camelCase schemas, Supabase auth, `/api/me` (+ onboarding, stats), `/api/users`, groups (§6.4, except `/invites` and `/sessions`), `/ws/me` presence + heartbeat. Stats, milestones and `activeSession` that depend on sessions return zeros/`null` until those phases land. Everything else below is the target design.
 
 ---
 
@@ -196,7 +196,7 @@ interface FriendRequest {
 interface GroupSummary {
   id: UUID;
   name: string;                    // 1–60 chars
-  description: string | null;
+  description: string | null;      // ≤ 500 chars; blank is stored as null
   memberCount: number;
   myRole: GroupRole;
   activeSession: { id: UUID; status: SessionStatus } | null;
@@ -578,10 +578,10 @@ Study invites to friends are sent per group or per session (§6.4, §6.5).
 | POST | `/api/groups/{groupId}/invite-code` | — | `Group` with a new `inviteCode`. Owner/admin |
 | POST | `/api/groups/{groupId}/invites` | `{ userId }` | `204`. Sends a `group_invite` notification containing the invite code. Any member, friends only |
 | PATCH | `/api/groups/{groupId}/members/{userId}` | `{ role: "admin" \| "member" }` | `GroupMember`. Owner only |
-| DELETE | `/api/groups/{groupId}/members/{userId}` | — | `204`. Owner/admin removes a member (not during their active session); or anyone removes themself (= leave). If the owner leaves, the oldest admin (else oldest member) becomes owner |
+| DELETE | `/api/groups/{groupId}/members/{userId}` | — | `204`. Remove someone (owner: anyone; admin: `member`s only; not during their active session), or remove yourself (= leave). If the owner leaves, the oldest admin (else oldest member) becomes owner. If the last member leaves, the group is deleted |
 | GET | `/api/groups/{groupId}/sessions?scope=active` [paged] | — | `{ items: SessionSummary[], nextCursor }`. `scope`: `active` \| `scheduled` \| `past` |
 
-**Permissions:** `owner` — everything, including roles. `admin` — edit group, regenerate invite code, remove members. `member` — create/join sessions, invite friends. Max 50 members per group. A group has at most **one active session** at a time (status not `settled`/`cancelled`).
+**Permissions:** `owner` — everything, including roles (the owner's own role can't be changed: `409 conflict`). `admin` — edit group, regenerate invite code, remove `member`s. `member` — create/join sessions, invite friends. Max 50 members per group. A group has at most **one active session** at a time (status not `settled`/`cancelled`).
 
 ### 6.5 Study sessions
 
@@ -792,7 +792,7 @@ If extended: `studyEndsAt += extensionMinutes`, `extension.used += 1`, back to `
 
 All messages are JSON: `{ "type": string, "data": object }`. The token goes in the query string because WebSockets can't send custom headers from browsers.
 
-Close codes: `4401` bad/expired token (refresh and reconnect), `4403` not allowed, `4404` not found. On any other disconnect, reconnect with backoff (1 s, 2 s, 5 s, then every 10 s) and refetch the relevant REST resource.
+Close codes: `4401` bad/expired token (refresh and reconnect), `4403` not allowed, `4404` not found (including: no profile yet), `4408` no message for 45 s (heartbeat timeout — just reconnect). On any other disconnect, reconnect with backoff (1 s, 2 s, 5 s, then every 10 s) and refetch the relevant REST resource.
 
 Both sockets accept `{ "type": "ping" }` and reply `{ "type": "pong" }`. Send a ping **every 15 s**.
 
@@ -901,8 +901,8 @@ backend/
 |---|---|
 | `users` | id (Supabase sub), email, username (unique), display_name, date_of_birth, avatar_url, equipped_avatar_id, equipped_banner_id, created_at |
 | `friendships` | id, requester_id, addressee_id, status (`pending`/`accepted`), created_at, accepted_at — unique pair |
-| `groups` | id, name, description, invite_code (unique), owner_id, created_at |
-| `group_members` | group_id, user_id, role, joined_at — unique pair |
+| `groups` | id, name, description, invite_code (unique), created_at — the owner is the `group_members` row with role `owner` |
+| `group_members` | group_id, user_id, role, joined_at — primary key (group_id, user_id) |
 | `sessions` | id, group_id, host_id, status, all `SessionConfig` columns, decided threshold_type/value, decided_by, extensions_used, timestamps |
 | `session_participants` | session_id, user_id, is_ready, joined_at, focused_seconds, unfocused_seconds, quiz_score, flagged_count, passed, rank, payout, bonus_tokens, review_done — unique pair |
 | `assessment_votes` | session_id, user_id, threshold_type, threshold_value — unique pair |

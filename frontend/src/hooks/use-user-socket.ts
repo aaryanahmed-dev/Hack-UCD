@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 
 import { WS_URL } from '@/lib/config';
@@ -11,8 +11,12 @@ const RETRY_DELAYS_MS = [1_000, 2_000, 5_000]; // then every 10 s (API_SPEC §8)
  * Keeps /ws/me open while the app is in the foreground — this is what makes you "online" to others.
  * Returns whether the socket is currently connected.
  */
-export function useUserSocket(enabled: boolean): boolean {
+export function useUserSocket(enabled: boolean, onMessage?: (type: string, data: any) => void): boolean {
   const [connected, setConnected] = useState(false);
+  const onMessageRef = useRef(onMessage);
+  useEffect(() => {
+    onMessageRef.current = onMessage;
+  }, [onMessage]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -59,7 +63,14 @@ export function useUserSocket(enabled: boolean): boolean {
         }
         scheduleReconnect();
       };
-      // Server → client events (notifications, friend status) are handled once those features exist.
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(String(event.data));
+          if (message.type && message.type !== 'pong') onMessageRef.current?.(message.type, message.data);
+        } catch {
+          // ignore malformed messages
+        }
+      };
     }
 
     const close = () => {

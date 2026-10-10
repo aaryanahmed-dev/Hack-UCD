@@ -1,16 +1,20 @@
-import { Redirect } from 'expo-router';
+import { Redirect, type Href } from 'expo-router';
+import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppText, BrandMark, Button } from '@/components/ui';
+import { clearReturnPath, getReturnPath } from '@/lib/return-path';
 import { useAuth } from '@/providers/auth';
 import { colors } from '@/theme';
 
 /** Holding screen while we work out where the user belongs; also the "can't reach server" screen. */
 export default function StartingScreen() {
   const { stage, profileError, reloadProfile, signOut } = useAuth();
+  // Once we leave this screen the original deep link has been used (or is no longer relevant).
+  useEffect(() => clearReturnPath, []);
 
-  if (stage === 'ready') return <Redirect href="/" />;
+  if (stage === 'ready') return <Redirect href={getReturnPath() as Href} />;
   if (stage === 'signed_out') return <Redirect href="/sign-in" />;
   if (stage === 'onboarding') return <Redirect href="/onboarding" />;
 

@@ -203,7 +203,7 @@ function InviteDialog({ groupId, onClose }: { groupId: string; onClose: () => vo
   );
 }
 
-function InviteCode({ group }: { group: GroupDetail }) {
+export function InviteCode({ group }: { group: GroupDetail }) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {

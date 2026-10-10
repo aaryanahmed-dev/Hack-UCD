@@ -28,12 +28,18 @@ function describeAuthError(error: AuthError | Error): string {
     case 'weak_password':
       return error.message || 'Choose a stronger password.';
     case 'over_email_send_rate_limit':
+      // Supabase's built-in mailer allows only a few emails per hour for the whole project.
+      return 'We can’t send more confirmation emails right now. Please try again a bit later.';
     case 'over_request_rate_limit':
-      return 'Too many attempts. Wait a minute and try again.';
+      // Per-IP limit — everyone on the same Wi-Fi shares one IP.
+      return 'Too many sign-in attempts from this network. Wait a few minutes and try again.';
     case 'signup_disabled':
       return 'New sign-ups are turned off right now.';
     case 'validation_failed':
       return error.message;
+  }
+  if ('status' in error && (error as AuthError).status === 429) {
+    return 'Too many attempts right now. Wait a few minutes and try again.';
   }
   if (/provider is not enabled/i.test(error.message)) return 'Google sign-in isn’t set up yet. Use email for now.';
   if (/fetch|network/i.test(error.message)) return "Can't reach the sign-in service. Check your connection.";
@@ -185,7 +191,7 @@ export default function SignInScreen() {
               <Pressable
                 key={m}
                 accessibilityRole="tab"
-                accessibilityState={{ selected: active }}
+                aria-selected={active}
                 onPress={() => switchMode(m)}
                 style={[styles.segmentItem, active && styles.segmentItemActive]}
               >

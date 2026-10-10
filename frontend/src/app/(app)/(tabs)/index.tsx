@@ -1,16 +1,17 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 
 import { CreateGroupSheet, InviteSheet, JoinGroupSheet } from '@/components/group-sheets';
 import { Screen } from '@/components/screen';
-import { Sheet } from '@/components/sheet';
 import { AppText, Avatar, Banner, Button, Card, Pill, type IconName } from '@/components/ui';
 import { useResource } from '@/hooks/use-resource';
 import { api } from '@/lib/api';
-import type { GroupSummary, UserStats } from '@/lib/types';
-import { useAuth, useMe } from '@/providers/auth';
-import { useLive } from '@/providers/live';
+import { formatDue } from '@/lib/dates';
+import type { CalendarEvent, GroupSummary, Todo, UserStats } from '@/lib/types';
+import { useMe } from '@/providers/auth';
+import { useLiveState } from '@/providers/live';
 import { colorFor, colors, fonts, initials, radius, shadow } from '@/theme';
 
 function greeting(): string {
@@ -34,11 +35,20 @@ const fetchGroups = async () => (await api.listGroups()).items;
 
 export default function HomeScreen() {
   const me = useMe();
-  const live = useLive();
+  const { connected: live, unreadCount } = useLiveState();
   const stats = useResource(api.getMyStats);
   const groups = useResource(fetchGroups);
+  const reloadStats = stats.reload;
+  const reloadGroups = groups.reload;
+  // Refresh when coming back from a group or session (balances and live sessions change).
+  useFocusEffect(
+    useCallback(() => {
+      reloadStats();
+      reloadGroups();
+    }, [reloadStats, reloadGroups]),
+  );
 
-  const [sheet, setSheet] = useState<'create' | 'join' | 'account' | null>(null);
+  const [sheet, setSheet] = useState<'create' | 'join' | null>(null);
   const [inviteGroupId, setInviteGroupId] = useState<string | null>(null);
 
   const refreshing = stats.refreshing || groups.refreshing;
@@ -61,11 +71,24 @@ export default function HomeScreen() {
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Account"
-          onPress={() => setSheet('account')}
+          accessibilityLabel={unreadCount ? `Notifications, ${unreadCount} unread` : 'Notifications'}
+          onPress={() => router.push('/notifications')}
+          style={({ pressed }) => [styles.bell, pressed && { backgroundColor: colors.line }]}
+        >
+          <Ionicons name={unreadCount ? 'notifications' : 'notifications-outline'} size={22} color={colors.ink} />
+          {unreadCount ? (
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>{unreadCount > 9 ? '9+' : unreadCount}</Text>
+            </View>
+          ) : null}
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Your profile"
+          onPress={() => router.push('/profile')}
           style={({ pressed }) => [styles.avatarButton, pressed && { opacity: 0.8 }]}
         >
-          <Avatar name={me.displayName} seed={me.id} size={46} />
+          <Avatar name={me.displayName} seed={me.id} equipped={me.equipped} size={46} />
           <View
             style={[styles.liveDot, { backgroundColor: live ? colors.live : colors.lineStrong }]}
             accessibilityLabel={live ? 'Online' : 'Offline'}
@@ -74,7 +97,9 @@ export default function HomeScreen() {
       </View>
 
       {/* Hero */}
-      <HeroCard stats={stats.data} loading={stats.loading} isAdult={me.isAdult} />
+      <Pressable accessibilityRole="button" accessibilityLabel="Open wallet" onPress={() => router.push('/wallet')} style={({ pressed }) => pressed && { opacity: 0.92 }}>
+        <HeroCard stats={stats.data} loading={stats.loading} isAdult={me.isAdult} />
+      </Pressable>
       {stats.error && !stats.data ? (
         <View style={styles.gapTop}>
           <Banner message={stats.error.message} action={{ label: 'Retry', onPress: stats.refresh }} />
@@ -85,7 +110,7 @@ export default function HomeScreen() {
       <View style={styles.statRow}>
         <StatTile
           icon="time-outline"
-          label="Focused this week"
+          label="Studied this week"
           value={stats.data ? formatMinutes(stats.data.weeklyStudyMinutes) : '—'}
         />
         <StatTile
@@ -99,6 +124,8 @@ export default function HomeScreen() {
           value={stats.data?.winRate != null ? `${stats.data.winRate}%` : '—'}
         />
       </View>
+
+      <UpNext />
 
       {/* Groups */}
       <View style={styles.sectionHeader}>
@@ -128,8 +155,82 @@ export default function HomeScreen() {
       <CreateGroupSheet visible={sheet === 'create'} onClose={() => setSheet(null)} onCreated={groups.reload} />
       <JoinGroupSheet visible={sheet === 'join'} onClose={() => setSheet(null)} onJoined={groups.reload} />
       <InviteSheet groupId={inviteGroupId} onClose={() => setInviteGroupId(null)} />
-      <AccountSheet visible={sheet === 'account'} onClose={() => setSheet(null)} />
     </Screen>
+  );
+}
+
+type NextItem = { key: string; title: string; when: Date; kind: 'task' | 'exam' | 'assignment' | 'study_session' | 'other'; href: string };
+
+const NEXT_ICON = {
+  task: 'checkbox-outline',
+  exam: 'school-outline',
+  assignment: 'document-text-outline',
+  study_session: 'people-outline',
+  other: 'calendar-outline',
+} as const;
+
+/** The next few deadlines and events across tasks and the calendar. */
+function UpNext() {
+  const [items, setItems] = useState<NextItem[] | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      const now = new Date();
+      Promise.all([
+        api.listTodos().catch(() => ({ items: [] as Todo[] })),
+        api.calendarEvents(now.toISOString(), new Date(now.getTime() + 14 * 86_400_000).toISOString()).catch(() => ({ items: [] as CalendarEvent[] })),
+      ]).then(([t, c]) => {
+        if (!active) return;
+        const next: NextItem[] = [
+          ...t.items
+            .filter((x) => !x.isDone && x.dueAt)
+            .map((x) => ({ key: `t-${x.id}`, title: x.title, when: new Date(x.dueAt!), kind: 'task' as const, href: '/tasks' })),
+          ...c.items
+            .filter((e) => new Date(e.startsAt) >= now)
+            .map((e) => ({
+              key: `e-${e.source}-${e.id}`,
+              title: e.title,
+              when: new Date(e.startsAt),
+              kind: e.kind,
+              href: e.sessionId ? `/sessions/${e.sessionId}` : '/calendar',
+            })),
+        ];
+        setItems(next.sort((a, b) => a.when.getTime() - b.when.getTime()).slice(0, 3));
+      });
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
+  if (!items || items.length === 0) return null;
+  return (
+    <>
+      <View style={styles.sectionHeader}>
+        <AppText variant="title">Up next</AppText>
+        <Button title="Calendar" variant="ghost" size="sm" onPress={() => router.push('/calendar')} />
+      </View>
+      <Card style={styles.nextCard}>
+        {items.map((it, i) => {
+          const due = formatDue(it.when.toISOString());
+          return (
+            <Pressable key={it.key} accessibilityRole="button" onPress={() => router.push(it.href as never)} style={[styles.nextRow, i > 0 && styles.nextDivider]}>
+              <View style={styles.nextIcon}>
+                <Ionicons name={NEXT_ICON[it.kind]} size={16} color={colors.primary} />
+              </View>
+              <View style={styles.flex}>
+                <AppText variant="label" numberOfLines={1}>
+                  {it.title}
+                </AppText>
+                <AppText variant="caption" style={due.tone === 'soon' ? { color: colors.accentInk } : undefined}>
+                  {due.label}
+                </AppText>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.lineStrong} />
+            </Pressable>
+          );
+        })}
+      </Card>
+    </>
   );
 }
 
@@ -159,7 +260,7 @@ function HeroCard({ stats, loading, isAdult }: { stats: UserStats | null; loadin
       </View>
       <Text style={styles.heroSub}>
         {stats
-          ? `${formatMinutes(stats.totalStudyMinutes)} focused all-time · ${stats.sessionsCompleted} sessions`
+          ? `${formatMinutes(stats.totalStudyMinutes)} studied all-time · ${stats.sessionsCompleted} ${stats.sessionsCompleted === 1 ? 'session' : 'sessions'}`
           : 'Stake tokens in a study session and keep them by passing the quiz.'}
       </Text>
     </View>
@@ -180,29 +281,37 @@ function StatTile({ icon, label, value }: { icon: IconName; label: string; value
 
 function GroupCard({ group, onInvite }: { group: GroupSummary; onInvite: () => void }) {
   const tint = colorFor(group.id);
+  // The open area and the invite button are siblings: nesting buttons is invalid on the web.
   return (
     <Card style={styles.groupCard}>
-      <View style={[styles.groupBadge, { backgroundColor: tint }]}>
-        <Text style={styles.groupBadgeText}>{initials(group.name)}</Text>
-      </View>
-      <View style={styles.groupBody}>
-        <AppText variant="heading" numberOfLines={1}>
-          {group.name}
-        </AppText>
-        {group.description ? (
-          <AppText variant="caption" numberOfLines={1}>
-            {group.description}
-          </AppText>
-        ) : null}
-        <View style={styles.groupMeta}>
-          <Pill
-            icon="people-outline"
-            label={`${group.memberCount} ${group.memberCount === 1 ? 'member' : 'members'}`}
-          />
-          <Pill tone={group.myRole === 'member' ? 'neutral' : 'primary'} label={roleLabel[group.myRole]} />
-          {group.activeSession ? <Pill tone="accent" icon="radio-button-on" label="Live session" /> : null}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open ${group.name}`}
+        onPress={() => router.push(`/groups/${group.id}`)}
+        style={({ pressed }) => [styles.groupOpen, pressed && { opacity: 0.7 }]}
+      >
+        <View style={[styles.groupBadge, { backgroundColor: tint }]}>
+          <Text style={styles.groupBadgeText}>{initials(group.name)}</Text>
         </View>
-      </View>
+        <View style={styles.groupBody}>
+          <AppText variant="heading" numberOfLines={1}>
+            {group.name}
+          </AppText>
+          {group.description ? (
+            <AppText variant="caption" numberOfLines={1}>
+              {group.description}
+            </AppText>
+          ) : null}
+          <View style={styles.groupMeta}>
+            <Pill
+              icon="people-outline"
+              label={`${group.memberCount} ${group.memberCount === 1 ? 'member' : 'members'}`}
+            />
+            <Pill tone={group.myRole === 'member' ? 'neutral' : 'primary'} label={roleLabel[group.myRole]} />
+            {group.activeSession ? <Pill tone="accent" icon="radio-button-on" label="Live session" /> : null}
+          </View>
+        </View>
+      </Pressable>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Invite friends to ${group.name}`}
@@ -236,45 +345,6 @@ function EmptyGroups({ onCreate, onJoin }: { onCreate: () => void; onJoin: () =>
   );
 }
 
-function AccountSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { signOut } = useAuth();
-  const me = useMe();
-  const live = useLive();
-  const [signingOut, setSigningOut] = useState(false);
-
-  return (
-    <Sheet visible={visible} onClose={onClose} title="Account">
-      <View style={styles.accountRow}>
-        <Avatar name={me.displayName} seed={me.id} size={56} />
-        <View style={styles.flex}>
-          <AppText variant="heading">{me.displayName}</AppText>
-          <AppText variant="caption">@{me.username}</AppText>
-          <AppText variant="caption">{me.email}</AppText>
-        </View>
-      </View>
-      <View style={styles.accountPills}>
-        <Pill tone={live ? 'primary' : 'neutral'} icon="radio-button-on" label={live ? 'Online' : 'Offline'} />
-        <Pill
-          tone={me.isAdult ? 'primary' : 'accent'}
-          icon={me.isAdult ? 'shield-checkmark' : 'leaf'}
-          label={me.isAdult ? 'Tokens & money' : 'Token mode'}
-        />
-      </View>
-      <Button
-        title="Sign out"
-        icon="log-out-outline"
-        variant="secondary"
-        loading={signingOut}
-        onPress={async () => {
-          setSigningOut(true);
-          onClose();
-          await signOut();
-        }}
-      />
-    </Sheet>
-  );
-}
-
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   centerText: { textAlign: 'center' },
@@ -284,6 +354,13 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   headerText: { flex: 1, marginRight: 12 },
   avatarButton: { borderRadius: 26 },
+  bell: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, marginRight: 10 },
+  badge: { position: 'absolute', top: 6, right: 6, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.surface },
+  badgeText: { fontFamily: fonts.bold, fontSize: 10, color: '#FFFFFF' },
+  nextCard: { padding: 0, overflow: 'hidden' },
+  nextRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
+  nextDivider: { borderTopWidth: 1, borderTopColor: colors.line },
+  nextIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.primarySoft, alignItems: 'center', justifyContent: 'center' },
   liveDot: {
     position: 'absolute',
     right: 0,
@@ -334,6 +411,7 @@ const styles = StyleSheet.create({
 
   groupList: { gap: 12 },
   groupCard: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16 },
+  groupOpen: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 14 },
   groupBadge: { width: 48, height: 48, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
   groupBadgeText: { fontFamily: fonts.bold, fontSize: 17, color: colors.onPrimary },
   groupBody: { flex: 1, gap: 4 },
@@ -359,6 +437,4 @@ const styles = StyleSheet.create({
   },
   emptyActions: { flexDirection: 'row', gap: 10, alignSelf: 'stretch', marginTop: 8 },
 
-  accountRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  accountPills: { flexDirection: 'row', gap: 8 },
 });

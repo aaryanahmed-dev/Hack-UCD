@@ -1,14 +1,16 @@
 import secrets
 import string
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, object_session
 
 from app.errors import ApiError, not_found
 from app.models.group import Group, GroupMember, GroupRole
+from app.models.session import ENDED_STATUSES, Participant, SessionStatus, StudySession
 from app.models.user import User
 from app.schemas.common import ListResponse
 from app.schemas.group import (
+    ActiveSessionRef,
     CreateGroup,
     GroupDetail,
     GroupMemberOut,
@@ -58,30 +60,74 @@ def _find_member(group: Group, user_id: str) -> GroupMember:
 # ───────── Serialization ─────────
 
 
+# A member counts as "studying" while in a session that has started and not finished.
+_IN_PROGRESS = [s for s in SessionStatus if s not in ENDED_STATUSES and s != SessionStatus.LOBBY]
+
+
+def _active_session(db: Session, group_id: str) -> StudySession | None:
+    return db.scalar(
+        select(StudySession)
+        .where(StudySession.group_id == group_id, StudySession.status.not_in(ENDED_STATUSES))
+        .order_by(StudySession.created_at.desc())
+    )
+
+
 def to_summary(group: Group, my_role: str) -> GroupSummary:
+    active = _active_session(object_session(group), group.id)
     return GroupSummary(
         id=group.id,
         name=group.name,
         description=group.description,
         member_count=len(group.members),
         my_role=my_role,
-        active_session=None,  # study sessions arrive in build phase 3
+        active_session=ActiveSessionRef(id=active.id, status=active.status) if active else None,
         created_at=group.created_at,
     )
 
 
-def to_member_out(member: GroupMember) -> GroupMemberOut:
+def to_member_out(member: GroupMember, studying: set[str] = frozenset()) -> GroupMemberOut:
     return GroupMemberOut(
         user=UserSummary.from_user(member.user),
         role=member.role,
-        status=manager.status(member.user_id),
+        status=manager.status(member.user_id, studying=member.user_id in studying),
         joined_at=member.joined_at,
     )
 
 
+def _studying_user_ids(db: Session, group_id: str) -> set[str]:
+    return set(
+        db.scalars(
+            select(Participant.user_id)
+            .join(StudySession, StudySession.id == Participant.session_id)
+            .where(StudySession.group_id == group_id, StudySession.status.in_(_IN_PROGRESS))
+        )
+    )
+
+
+def _group_stats(db: Session, group_id: str) -> GroupStats:
+    settled = (
+        select(Participant)
+        .join(StudySession, StudySession.id == Participant.session_id)
+        .where(StudySession.group_id == group_id, StudySession.status == SessionStatus.SETTLED)
+        .subquery()
+    )
+    focused, avg_score = db.execute(
+        select(func.coalesce(func.sum(settled.c.focused_seconds), 0), func.avg(settled.c.quiz_score))
+    ).one()
+    completed = db.scalar(
+        select(func.count()).where(StudySession.group_id == group_id, StudySession.status == SessionStatus.SETTLED)
+    )
+    return GroupStats(
+        total_focused_minutes=int(focused) // 60,
+        sessions_completed=int(completed or 0),
+        average_quiz_score=round(float(avg_score)) if avg_score is not None else None,
+    )
+
+
 def to_detail(group: Group, my_role: str) -> GroupDetail:
-    # Stats come from settled sessions (build phase 5); zero until then.
-    stats = GroupStats(total_focused_minutes=0, sessions_completed=0, average_quiz_score=None)
+    db = object_session(group)
+    stats = _group_stats(db, group.id)
+    studying = _studying_user_ids(db, group.id)
     progress = {
         "focus_hours": stats.total_focused_minutes // 60,
         "sessions_completed": stats.sessions_completed,
@@ -90,7 +136,7 @@ def to_detail(group: Group, my_role: str) -> GroupDetail:
     return GroupDetail(
         **to_summary(group, my_role).model_dump(),
         invite_code=group.invite_code,
-        members=[to_member_out(m) for m in members],
+        members=[to_member_out(m, studying) for m in members],
         stats=stats,
         milestones=[
             Milestone(
@@ -149,7 +195,8 @@ def update_group(db: Session, membership: GroupMember, data: UpdateGroup) -> Gro
 
 def delete_group(db: Session, membership: GroupMember) -> None:
     require_role(membership, GroupRole.OWNER)
-    # Once sessions exist: refuse while the group has an active session.
+    if _active_session(db, membership.group_id) is not None:
+        raise ApiError(409, "conflict", "Finish or cancel the group's session first.")
     db.delete(membership.group)
     db.commit()
 
@@ -197,12 +244,15 @@ def remove_member(db: Session, membership: GroupMember, target_user_id: str) -> 
         )
         if not allowed:
             raise ApiError(403, "forbidden", "You don't have permission to remove this member.")
-        # Once sessions exist: refuse while the target is in an active session.
+        if _in_active_session(db, group.id, target.user_id):
+            raise ApiError(409, "conflict", "They're in a session right now — try again after it ends.")
         group.members.remove(target)
         db.commit()
         return
 
     # Leaving
+    if _in_active_session(db, group.id, target.user_id):
+        raise ApiError(409, "conflict", "Leave or finish your session in this group first.")
     remaining = [m for m in group.members if m.user_id != target.user_id]
     if not remaining:
         db.delete(group)  # last member out: the group goes too
@@ -213,3 +263,18 @@ def remove_member(db: Session, membership: GroupMember, target_user_id: str) -> 
         successor.role = GroupRole.OWNER
     group.members.remove(target)
     db.commit()
+
+
+def _in_active_session(db: Session, group_id: str, user_id: str) -> bool:
+    return (
+        db.scalar(
+            select(Participant.user_id)
+            .join(StudySession, StudySession.id == Participant.session_id)
+            .where(
+                StudySession.group_id == group_id,
+                StudySession.status.not_in(ENDED_STATUSES),
+                Participant.user_id == user_id,
+            )
+        )
+        is not None
+    )

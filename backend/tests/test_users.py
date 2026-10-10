@@ -29,7 +29,7 @@ def test_get_user(client, new_user):
         "username": "bob",
         "displayName": "Bob",
         "avatarUrl": None,
-        "equipped": {"avatar": None, "banner": None},
+        "equipped": {"avatar": None, "frame": None, "banner": None},
     }
     missing = client.get("/api/users/00000000-0000-0000-0000-000000000000", headers=headers)
     assert missing.status_code == 404

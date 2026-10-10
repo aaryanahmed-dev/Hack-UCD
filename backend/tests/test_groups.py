@@ -42,7 +42,7 @@ def test_create_group(client, new_user):
     assert g["members"] == [
         {
             "user": {"id": me["id"], "username": "alice", "displayName": "Alice", "avatarUrl": None,
-                     "equipped": {"avatar": None, "banner": None}},
+                     "equipped": {"avatar": None, "frame": None, "banner": None}},
             "role": "owner",
             "status": "offline",
             "joinedAt": g["members"][0]["joinedAt"],

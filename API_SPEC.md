@@ -3,7 +3,7 @@
 The single source of truth for how the FastAPI backend behaves and how the React Native (Expo) frontend talks to it.
 Frontend code must follow this contract exactly; backend code must implement it exactly. If something needs to change, change this file first.
 
-> **Status:** Phases 1–2 implemented: error format, camelCase schemas, Supabase auth, `/api/me` (+ onboarding, stats), `/api/users`, groups (§6.4, except `/invites` and `/sessions`), `/ws/me` presence + heartbeat. Stats, milestones and `activeSession` that depend on sessions return zeros/`null` until those phases land. Everything else below is the target design.
+> **Status:** Implemented: everything in §6 except withdrawals, donation receipts and AI session summaries — including Stripe sandbox coin purchases (Checkout Sessions + Products/Prices, webhook and confirm-on-return fulfilment), Persona ID verification gating real money, and the token store (avatars, avatar frames, streak freezes).
 
 ---
 
@@ -18,7 +18,7 @@ Expo app ──(Supabase JS)──► Supabase Auth          (email + Google sig
     │
     └──(HTTPS + WebSocket, Bearer token)──► FastAPI ──► MySQL (all app data)
                                                ├──► local disk       (uploaded study files)
-                                               ├──► OpenRouter       (quiz generation with a Gemini model, answer grading, summaries)
+                                               ├──► OpenRouter       (Gemma 4 31B: quiz generation, answer grading, summaries)
                                                ├──► Stripe           (buy coins, test mode)
                                                ├──► Google Calendar  (read events, add session events + reminders)
                                                └──► Resend           (session summary emails)
@@ -26,7 +26,7 @@ Expo app ──(Supabase JS)──► Supabase Auth          (email + Google sig
 
 - **Supabase is used for authentication only.** No Supabase database, storage or realtime.
 - **The API owns everything else.** The frontend never talks to MySQL, OpenRouter, Google Calendar, Resend or Stripe directly (except opening URLs the API returns).
-- All AI calls go through **OpenRouter**; quiz generation uses a Gemini model via OpenRouter (model names are config, §11.4).
+- All AI calls go through **OpenRouter**; quiz generation and grading use Google's **Gemma 4 31B** (free) via OpenRouter (model names are config, §11.4).
 - One backend process (one Uvicorn worker) — realtime connections are kept in memory.
 
 ## 3. Global conventions
@@ -54,7 +54,7 @@ Expo app ──(Supabase JS)──► Supabase Auth          (email + Google sig
 
 - **camelCase** keys in all request and response bodies (`displayName`, `studyEndsAt`). Query parameters are camelCase too.
 - **IDs** are UUID strings. User IDs are the Supabase user ID.
-- **Timestamps** are ISO 8601 in UTC with a `Z` suffix: `"2026-10-10T14:03:00Z"`. Dates without time (date of birth) are `"YYYY-MM-DD"`. The frontend converts to local time for display.
+- **Timestamps** are ISO 8601 in UTC with milliseconds and a `Z` suffix: `"2026-10-10T14:03:00.123Z"`. Dates without time (date of birth) are `"YYYY-MM-DD"`. The frontend converts to local time for display.
 - **Amounts** are integers. `tokens` and `coins` are both whole numbers; **1 coin = €0.01**. Never floats.
 - **Percentages** are integers `0–100`.
 - **Enums** are lowercase snake_case strings (see §12).
@@ -250,12 +250,12 @@ interface SessionConfig {          // set by the session host in the lobby
   mode: "tokens" | "money";        // money requires every participant isAdult
   stakeAmount: number;             // per participant; tokens ≥ 0, coins ≥ 100
   payoutTarget: "winners" | "charity";
-  charityId: UUID | null;          // required when mode = "money" (also used if nobody passes)
+  charityId: UUID | null;          // required when payoutTarget = "charity"
   studyMinutes: number;            // 5–240
   extensionMinutes: number;        // 5–60, length of one extension (default 10)
   maxExtensions: number;           // 0–3 (default 2)
   quizQuestionCount: number;       // 5–10
-  minFocusPercent: number;         // 0–100; 0 = focus not required to pass
+  minFocusPercent: number;         // legacy, keep 0 — study time is no longer focus-tracked (§7.4)
   maxParticipants: number;         // 2–10
   scheduledFor: ISODateTime | null;// optional planned start (calendar + reminders)
 }
@@ -271,6 +271,7 @@ interface StudySession {
   status: SessionStatus;
   host: UserSummary;
   config: SessionConfig;
+  charity: Charity | null;         // the session's charity (config.charityId), if any
   participants: Participant[];
   materials: Material[];
   assessment: {
@@ -285,6 +286,7 @@ interface StudySession {
       endsAt: ISODateTime;
       yes: number;
       no: number;
+      voted: number;               // participants who have voted (yes + no)
       myVote: boolean | null;
     } | null;
     lastOutcome: { extended: boolean; decidedBy: "vote" | "coin_flip" } | null;
@@ -296,12 +298,15 @@ interface StudySession {
   quizEndsAt: ISODateTime | null;      // hard cut-off for the whole quiz
   reviewEndsAt: ISODateTime | null;
   settledAt: ISODateTime | null;
+  cancelReason: string | null;     // set when status = "cancelled"
+  serverTime: ISODateTime;         // server clock when this snapshot was built — use it to correct countdowns
   me: {
     isHost: boolean;
     isParticipant: boolean;
     isReady: boolean;
-    quizProgress: { answered: number; total: number } | null;
+    quizProgress: { answered: number; total: number; flagged: number } | null;
     reviewDone: boolean;
+    wantsToFinish: boolean;
   };
 }
 
@@ -325,6 +330,8 @@ interface Participant {
   isReady: boolean;
   joinedAt: ISODateTime;
   presence: "online" | "offline";  // connected to the session WebSocket
+  hasVoted: boolean;               // cast an assessment vote (lobby)
+  wantsToFinish: boolean;          // opted in to finishing the study block early
   focus: FocusSummary | null;      // null in lobby
   quizProgress: { answered: number; total: number; flagged: number } | null;
   result: ParticipantResult | null;// provisional in "review", final in "settled"
@@ -461,14 +468,22 @@ interface Donation {               // a charity impact receipt
 // ───────── Leaderboards ─────────
 
 interface LeaderboardRow {
-  rank: number;
+  rank: number | null;             // null when the metric has no value (avg score needs 3+ quizzes); ties share a rank
   user: UserSummary;               // includes me
-  value: number;                   // the selected metric
+  value: number | null;            // the selected metric
   weeklyStudyMinutes: number;
   averageQuizScore: number | null;
   tokens: number;
-  wonFromMe: number | null;        // friends scope only: coins this user won from me (tokens in tokens-only accounts)
-  lostToMe: number | null;         // friends scope only
+  sessionsCompleted: number;
+  wonFromMe: { tokens: number; coins: number } | null;  // friends scope only: what this person has won from you
+  lostToMe: { tokens: number; coins: number } | null;   // friends scope only: what you've won from them
+}
+
+interface ActivityDay {            // GET /api/me/activity
+  date: ISODate;                   // UTC day
+  studyMinutes: number;
+  sessions: number;
+  todosCompleted: number;
 }
 
 // ───────── Productivity ─────────
@@ -558,7 +573,7 @@ Username: 3–20 chars, `a–z`, `0–9`, `_`, stored lowercase, unique. Display
 |---|---|---|---|
 | GET | `/api/friends` | — | `{ items: Friend[] }` (includes live `status`) |
 | GET | `/api/friends/requests` | — | `{ items: FriendRequest[] }` |
-| POST | `/api/friends/requests` | `{ username }` | `201 FriendRequest`. If they already requested you, it auto-accepts and returns `200 Friend` |
+| POST | `/api/friends/requests` | `{ username }` | `201 { request: FriendRequest \| null, friend: Friend \| null }` — `friend` is set when they'd already requested you (auto-accepted). Sends a `friend_request` notification |
 | POST | `/api/friends/requests/{requestId}/accept` | — | `Friend` |
 | DELETE | `/api/friends/requests/{requestId}` | — | `204` (decline or cancel) |
 | DELETE | `/api/friends/{userId}` | — | `204` (unfriend) |
@@ -599,6 +614,7 @@ Study invites to friends are sent per group or per session (§6.4, §6.5).
 | POST | `/api/sessions/{sessionId}/ready` | `{ isReady: boolean }` | `StudySession` |
 | POST | `/api/sessions/{sessionId}/start` | — | `StudySession` (now `studying`). Host only |
 | POST | `/api/sessions/{sessionId}/extension-vote` | `{ extend: boolean }` | `StudySession`. `extension_vote` only, once |
+| POST | `/api/sessions/{sessionId}/finish-early` | `{ wantsToFinish: boolean }` | `StudySession`. `studying` only; can be undone. When **every** participant has opted in, the study block ends now and the session goes straight to `generating_quiz` (no extension vote). Flags reset when an extension starts |
 | POST | `/api/sessions/{sessionId}/focus-events` | `{ state: "focused" \| "idle" \| "away", at }` | `204`. REST fallback for §8 when the WebSocket is down |
 
 **Shared session to-dos** (participants; real-time via `session.todos` events):
@@ -646,11 +662,29 @@ Adding or deleting material **un-readies everyone**; the uploader auto-approves 
 
 Buying coins: open `checkoutUrl` with `expo-web-browser`. Stripe redirects to `studystakes://wallet?checkout=success` (or `=cancelled`). Coins arrive via the webhook — refetch `GET /api/wallet` after the redirect (poll every 2 s for up to 20 s). Coins are the **escrow**: staking moves them into `lockedCoins` until settlement.
 
+**As built (wallet, payments, verification, store):**
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/wallet` | — | `{ tokens, coins, lockedTokens, lockedCoins, paymentsConfigured, packs: [{ coins, amountCents, currency, label }] }` |
+| GET | `/api/wallet/transactions?currency=` [paged] | — | `LedgerEntry[]` |
+| POST | `/api/wallet/checkout` | `{ coins, returnTo }` | `{ checkoutUrl }` — Stripe-hosted Checkout (sandbox). Adults only; `403 verification_required` until ID-verified when Persona is configured; `409 payments_not_configured` without Stripe keys |
+| POST | `/api/wallet/checkout/confirm` | `{ sessionId }` | `Payment` — the app calls this when Stripe redirects to `returnTo?checkout=success&session_id=…`; checks with Stripe and credits coins once (idempotent with the webhook) |
+| POST | `/api/webhooks/stripe` **(public, Stripe signature)** | Stripe event | `200` — `checkout.session.completed` / `async_payment_succeeded` credit coins; `expired` marks the payment |
+| GET | `/api/me/verification` | — | `{ required, verified, status, verifiedAt }` |
+| POST | `/api/me/verification/start` | `{ redirectUri }` | `{ url }` — Persona hosted flow (reference-id = user id) |
+| POST | `/api/me/verification/refresh` | — | `Verification` — looks up the user's Persona inquiries; approved/completed → verified |
+| GET | `/api/shop/items` | — | `{ items: [{ id, kind: "avatar"\|"frame"\|"streak_freeze", name, description, priceTokens, data: { icon, color }, owned, equipped }] }` |
+| POST | `/api/shop/items/{itemId}/purchase` | — | `ShopItem` — spends tokens; cosmetics once, streak freezes stack (max 5) |
+
+`Me` also has `idVerified` and `verificationRequired`; `EquippedItems` is `{ avatar, frame, banner }` (store item ids). Equip with `PATCH /api/me { equipped: { avatar | frame: id | null } }` — you must own the item. **Pricing model:** 1 coin = €0.01, sold in packs of 500 / 1,000 / 2,000 / 5,000 coins (€5–€50); each pack is a Stripe Product + Price (lookup key `study_stakes_coins_<n>`). **Streak freezes** are spent automatically to cover missed days before your latest streak.
+
 ### 6.9 Leaderboards
 
 | Method | Path | Response |
 |---|---|---|
 | GET | `/api/leaderboard?scope=friends&metric=weekly_study&groupId=` | `{ items: LeaderboardRow[], me: LeaderboardRow }` |
+| GET | `/api/me/activity?days=14` | `{ days: ActivityDay[] }` — oldest first, 1–90 days |
 
 - `scope`: `friends` (me + accepted friends) \| `global` (top 100) \| `group` (requires `groupId`, members only).
 - `metric`: `weekly_study` (minutes this week) \| `avg_score` (average quiz score, min 3 sessions) \| `tokens` (current balance).
@@ -685,12 +719,13 @@ A `Donation` is created for each failed participant whose stake goes to charity 
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/calendar/events?from=…&to=…` | — | `{ items: CalendarEvent[] }` — merged manual + Google + my scheduled/past sessions. Both params required, max 93 days |
+| GET | `/api/calendar/events?from=…&to=…` | — | `{ items: CalendarEvent[], googleError: string \| null }` — merged manual + Google + sessions (ones I took part in, plus scheduled lobbies in my groups). Both params required, max 93 days. Google failures don't fail the request |
 | POST | `/api/calendar/events` | `{ title, kind, startsAt, endsAt?, allDay?, notes? }` | `201 CalendarEvent` (`source: "manual"`) |
 | PATCH | `/api/calendar/events/{eventId}` | partial | `CalendarEvent` (manual only) |
 | DELETE | `/api/calendar/events/{eventId}` | — | `204` (manual only) |
-| POST | `/api/calendar/google/connect` | — | `{ authUrl }` — open in `expo-web-browser` |
-| GET | `/api/calendar/google/callback` **(public, OAuth `state`)** | — | redirects to `studystakes://calendar?google=connected` (or `=error`) |
+| GET | `/api/calendar/google` | — | `{ configured, connected, googleEmail }` — `configured: false` when the server has no Google credentials |
+| POST | `/api/calendar/google/connect` | `{ returnTo }` | `{ authUrl }` — web: navigate to it; native: `expo-web-browser`. `returnTo` must be this app (web origin, local dev, `PUBLIC_BASE_URL` or `studystakes://`). `409 google_not_configured` if not set up |
+| GET | `/api/calendar/google/callback` **(public, OAuth `state`)** | — | redirects to `returnTo?google=connected` (or `=error`) |
 | DELETE | `/api/calendar/google` | — | `204` disconnect |
 
 With Google connected: Google events are read live (not stored), and every session I join with a `scheduledFor` time is added to my Google Calendar with a **15-minute popup reminder**. The API also sends a `session_starting` notification 15 minutes before `scheduledFor`.
@@ -709,6 +744,7 @@ Equip avatars/banners with `PATCH /api/me { equipped: { banner: "<itemId>" } }` 
 | Method | Path | Response |
 |---|---|---|
 | GET | `/api/notifications?unreadOnly=true` [paged] | `{ items: Notification[], nextCursor }` |
+| GET | `/api/notifications/unread-count` | `{ count }` |
 | POST | `/api/notifications/read` | body `{ ids: UUID[] }` or `{ all: true }` → `204` |
 
 New notifications are also pushed live over `/ws/me` (§8.1).
@@ -744,13 +780,14 @@ The **server** drives every transition after `start` (timers run on the backend)
 | `top_percent` | % of participants who pass, e.g. 50 | they're in the top `ceil(n × value / 100)` by score (min 1); anyone tied with the last passing score also passes |
 | `relative_to_best` | max points behind the best, e.g. 15 | `quizScore ≥ bestScore − thresholdValue` |
 
-A participant **passes** if their quiz passes **and** `focusPercent ≥ minFocusPercent`.
+A participant **passes** if their quiz passes. (Study time isn't focus-tracked; anti-cheat applies to the quiz — §7.6.)
 
 ### 7.4 Studying (Phase B — focus block)
 
 - Shared countdown: every client renders from the server's `studyEndsAt`.
-- Clients report focus (§8.2). The server accumulates `focusedSeconds` / `unfocusedSeconds`. States: `focused` (app/tab active), `idle` (active but no interaction for 3 min — web only), `away` (app backgrounded / tab hidden), `offline` (no heartbeat for 45 s).
+- **Study time is not focus-tracked** — people can use books, notes or other tabs. Every participant's study block counts in full (`focusedSeconds`), and focus updates sent while studying are ignored.
 - Participants share a real-time to-do list (`/todos`, `session.todos` events).
+- **Finish early:** anyone can opt in with `POST /finish-early`; once everyone has, the block ends immediately (focus is counted up to that moment) and the quiz is generated without an extension vote.
 
 ### 7.5 Extension vote
 
@@ -763,7 +800,7 @@ If extended: `studyEndsAt += extensionMinutes`, `extension.used += 1`, back to `
 
 ### 7.6 Quiz (Phase C) & anti-cheat
 
-- The AI (Gemini via OpenRouter) generates `quizQuestionCount` questions (5–10) from the extracted material text: ≈ 70% multiple choice, 30% short answer. All participants get the same questions **in the same order**.
+- The AI (Gemma 4 31B via OpenRouter) generates `quizQuestionCount` questions (5–10) from the extracted material text: ≈ 70% multiple choice, 30% short answer. All participants get the same questions **in the same order**.
 - **One question at a time.** `GET /quiz/current` returns the next unanswered question; the first fetch starts its **20-second timer** (`deadline`). The answer must reach the server by `deadline + 2 s` grace, otherwise `409 question_expired` and the question scores 0 (the next `GET /quiz/current` moves on). No going back.
 - **Tab-focus tracking:** the client keeps sending focus updates during the quiz. If the participant leaves the app/tab while a question is open, that question is **flagged and scores 0**; flags are visible to everyone in the review.
 - `quizEndsAt = quizStartsAt + questions × 20 s + 2 min` is the hard cut-off. Unanswered questions score 0.
@@ -784,8 +821,8 @@ If extended: `studyEndsAt += extensionMinutes`, `extension.used += 1`, back to `
 3. Each **loser's** stake goes:
    - `payoutTarget = "winners"`: split among winners **in proportion to their quiz scores** (`winnings`, `counterparty` = the loser). Rounding uses the largest-remainder method so nothing is lost.
    - `payoutTarget = "charity"`: to the session's charity (`charity_donation` + a `Donation` receipt). Token stakes "donated" are burned.
-4. **Nobody passes:** money → all stakes go to the charity; tokens → burned. **Everybody passes:** everyone just gets their stake back.
-5. **Winner's bonus:** every winner gets `winner_bonus` tokens = `floor(focusedMinutes × 1.5)` — in money mode too, as compensation for Stripe fees that can't be returned.
+4. **Nobody passes:** with `payoutTarget = "winners"` everyone gets their stake back (there's no one to pay); with `"charity"` money is donated and tokens are burned. **Everybody passes:** everyone gets their stake back.
+5. **Winner's bonus:** every winner gets `winner_bonus` tokens = `floor(studiedMinutes × 1.5)` — in money mode too, as compensation for Stripe fees that can't be returned.
 6. Status → `settled`; send `session_settled` notifications; update streaks and milestones; generate the **AI session summary** (recap + concepts each participant missed), show it in-app and email it to each participant.
 
 ## 8. Realtime (WebSockets)
@@ -813,14 +850,13 @@ Open while a session screen is open (group members only).
 | Server → client | `data` | When |
 |---|---|---|
 | `session.updated` | `StudySession` | On connect and after **any** change (join/leave, ready, config, materials, votes, status change, extension, quiz progress, disputes, results). The frontend replaces its state with this. |
-| `participant.focus` | `{ userId, focus: FocusSummary }` | A participant's focus state changes, plus every 15 s during `studying` |
-| `participant.presence` | `{ userId, presence }` | A participant connects/disconnects |
+| *(not sent)* | | Focus and presence changes arrive as a fresh `session.updated` snapshot; separate `participant.focus` / `participant.presence` events are not used. Compute live focus seconds client-side between snapshots if needed. |
 | `session.todos` | `{ items: SessionTodo[] }` | Shared to-do list changed |
 | `error` | `{ code, message }` | Bad client message |
 
 | Client → server | `data` | When |
 |---|---|---|
-| `focus.update` | `{ state: "focused" \| "idle" \| "away" }` | Immediately when the app/tab changes state during `studying` **and `quiz`** (Expo `AppState`: `active` = focused, else away; web: `visibilitychange` + 3 min without input = idle) |
+| `focus.update` | `{ state: "focused" \| "idle" \| "away" }` | During the **`quiz`** only (anti-cheat): immediately when the app/tab changes state (Expo `AppState`: `active` = focused, else away; web: `visibilitychange` / window blur). Leaving while a question is open flags it. Everyone's quiz focus state is visible to the group |
 | `ping` | `{}` | Every 15 s. **No ping for 45 s during `studying`/`quiz` counts as `offline`** |
 
 If the socket is down, send `POST /api/sessions/{id}/focus-events` instead.
@@ -939,7 +975,7 @@ backend/
 | `PUBLIC_BASE_URL` | Public URL of the API (ngrok) — for badge/share links and OAuth callback |
 | `SUPABASE_URL` | `https://<project>.supabase.co` — for JWKS |
 | `OPENROUTER_API_KEY` | All AI calls |
-| `QUIZ_MODEL` / `GRADING_MODEL` / `SUMMARY_MODEL` | OpenRouter model ids (quiz: a Gemini model) |
+| `QUIZ_MODEL` / `GRADING_MODEL` / `SUMMARY_MODEL` | OpenRouter model ids. Default for quiz + grading: `google/gemma-4-31b-it:free` |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Test-mode keys |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Calendar OAuth |
 | `TOKEN_ENCRYPTION_KEY` | Encrypts Google refresh tokens |

@@ -3,7 +3,7 @@ import re
 from app.timeutil import utc_now
 from tests.conftest import auth_headers, make_token
 
-ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 
 def test_onboarding_creates_profile(client):
@@ -20,11 +20,13 @@ def test_onboarding_creates_profile(client):
         "username": "alex_99",
         "displayName": "Alex",
         "avatarUrl": None,
-        "equipped": {"avatar": None, "banner": None},
+        "equipped": {"avatar": None, "frame": None, "banner": None},
         "email": "alex@example.com",
         "dateOfBirth": "2000-05-01",
         "isAdult": True,
         "googleCalendarConnected": False,
+        "idVerified": False,
+        "verificationRequired": False,
         "createdAt": body["createdAt"],
     }
     assert ISO_Z.match(body["createdAt"])

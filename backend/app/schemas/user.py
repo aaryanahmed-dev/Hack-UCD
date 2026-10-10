@@ -10,8 +10,9 @@ USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 
 
 class EquippedItems(CamelModel):
-    avatar: str | None = None
-    banner: str | None = None
+    avatar: str | None = None  # token store item id, e.g. "avatar-rocket"
+    frame: str | None = None  # e.g. "frame-gold"
+    banner: str | None = None  # reserved
 
 
 class UserSummary(CamelModel):
@@ -31,6 +32,8 @@ class Me(UserSummary):
     date_of_birth: date
     is_adult: bool
     google_calendar_connected: bool
+    id_verified: bool  # passed Persona ID verification
+    verification_required: bool  # money features need id_verified (server has Persona configured)
     created_at: UTCDateTime
 
     @classmethod
@@ -40,9 +43,17 @@ class Me(UserSummary):
             email=user.email,
             date_of_birth=user.date_of_birth,
             is_adult=is_adult(user.date_of_birth),
-            google_calendar_connected=False,  # Google Calendar sync is a later phase
+            google_calendar_connected=False,
+            id_verified=user.id_verified_at is not None,
+            verification_required=_verification_required(),
             created_at=user.created_at,
         )
+
+
+def _verification_required() -> bool:
+    from app.services import verification
+
+    return verification.required()
 
 
 def _summary_fields(user) -> dict:
@@ -51,7 +62,7 @@ def _summary_fields(user) -> dict:
         username=user.username,
         display_name=user.display_name,
         avatar_url=user.avatar_url,
-        equipped=EquippedItems(avatar=user.equipped_avatar_id, banner=user.equipped_banner_id),
+        equipped=EquippedItems(avatar=user.equipped_avatar_id, frame=user.equipped_frame_id, banner=user.equipped_banner_id),
     )
 
 

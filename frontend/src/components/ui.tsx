@@ -16,6 +16,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
+import { AVATARS, FRAMES } from '@/lib/cosmetics';
 import { colorFor, colors, fonts, initials, radius, shadow } from '@/theme';
 
 export type IconName = ComponentProps<typeof Ionicons>['name'];
@@ -77,7 +78,8 @@ export function Button({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? title}
-      accessibilityState={{ disabled: !!inactive, busy: !!loading }}
+      aria-disabled={!!inactive}
+      aria-busy={!!loading}
       disabled={inactive}
       onPress={() => {
         if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
@@ -224,21 +226,41 @@ export function Pill({ label, tone = 'neutral', icon }: { label: string; tone?: 
   );
 }
 
-export function Avatar({ name, seed, size = 40 }: { name: string; seed: string; size?: number }) {
+/** Initials on a colour — or the equipped store avatar, with an optional coloured frame ring. */
+export function Avatar({
+  name,
+  seed,
+  size = 40,
+  equipped,
+}: {
+  name: string;
+  seed: string;
+  size?: number;
+  equipped?: { avatar?: string | null; frame?: string | null } | null;
+}) {
+  const custom = equipped?.avatar ? AVATARS[equipped.avatar] : undefined;
+  const frame = equipped?.frame ? FRAMES[equipped.frame] : undefined;
+  const ring = frame ? Math.max(2, Math.round(size * 0.07)) : 0;
   return (
     <View
       style={{
         width: size,
         height: size,
         borderRadius: size / 2,
-        backgroundColor: colorFor(seed),
+        backgroundColor: custom?.color ?? colorFor(seed),
         alignItems: 'center',
         justifyContent: 'center',
+        borderWidth: ring,
+        borderColor: frame,
       }}
     >
-      <Text style={{ color: colors.onPrimary, fontFamily: fonts.semibold, fontSize: size * 0.38 }}>
-        {initials(name)}
-      </Text>
+      {custom ? (
+        <Ionicons name={custom.icon as IconName} size={(size - ring * 2) * 0.5} color={colors.onPrimary} />
+      ) : (
+        <Text style={{ color: colors.onPrimary, fontFamily: fonts.semibold, fontSize: (size - ring * 2) * 0.38 }}>
+          {initials(name)}
+        </Text>
+      )}
     </View>
   );
 }

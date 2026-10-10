@@ -3,7 +3,7 @@
 The single source of truth for how the FastAPI backend behaves and how the React Native (Expo) frontend talks to it.
 Frontend code must follow this contract exactly; backend code must implement it exactly. If something needs to change, change this file first.
 
-> **Status:** planned. Implemented so far: `GET /health`, `GET /health/db`, MySQL connection, Alembic. Everything else below is the target design.
+> **Status:** Phase 1 (Foundation) implemented: error format, camelCase schemas, Supabase auth, `/api/me` (+ onboarding, stats), `/api/users`. Stats that depend on sessions return zeros until those phases land. Everything else below is the target design.
 
 ---
 

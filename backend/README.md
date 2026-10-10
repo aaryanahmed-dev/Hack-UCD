@@ -8,7 +8,7 @@ FastAPI app. The API contract (endpoints, JSON conventions, session lifecycle, r
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # macOS/Linux
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
@@ -35,6 +35,14 @@ alembic upgrade head
 ```
 
 Teammates run `alembic upgrade head` after pulling.
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+Tests use an in-memory SQLite database and locally signed tokens — no MySQL or Supabase needed.
 
 ## Share it (ngrok)
 

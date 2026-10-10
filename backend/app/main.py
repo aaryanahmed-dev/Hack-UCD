@@ -1,26 +1,31 @@
-import os
+import logging
 
-from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv()
+from app import config
+from app.errors import register_error_handlers
+from app.routers import health, me, users
 
-from app.routers import health  # noqa: E402
+logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Hack UCD API")
+app = FastAPI(title="Study Stakes API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(","),
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+register_error_handlers(app)
+
 app.include_router(health.router)
+app.include_router(me.router)
+app.include_router(users.router)
 
 
 @app.get("/")
 def root():
-    return {"message": "Hack UCD API"}
+    return {"message": "Study Stakes API"}

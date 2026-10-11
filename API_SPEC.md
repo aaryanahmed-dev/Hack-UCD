@@ -1,6 +1,6 @@
 # Study Stakes — Backend API Spec
 
-The single source of truth for how the FastAPI backend behaves and how the React Native (Expo) frontend talks to it.
+ The single source of truth for how the FastAPI backend behaves and how the React Native (Expo) frontend talks to it.
 Frontend code must follow this contract exactly; backend code must implement it exactly. If something needs to change, change this file first.
 
 > **Status:** Implemented: everything in §6 except withdrawals, donation receipts and AI session summaries — including Stripe sandbox coin purchases (Checkout Sessions + Products/Prices, webhook and confirm-on-return fulfilment), Persona ID verification gating real money, and the token store (avatars, avatar frames, streak freezes).
